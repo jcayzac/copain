@@ -191,6 +191,7 @@ This explains several key decisions:
 - No mandatory Node.js, Deno, Bun, or Vite involvement.
 - No direct `.d.ts` file emission by the component system itself.
 - No direct CSS or ESM bundling by the component system itself.
+- No custom import-resolution system owned by the component system.
 
 ## High-Level Architecture
 
@@ -304,6 +305,8 @@ But the component system itself should work with a more abstract model:
 
 This means the component system should model artifact association abstractly, not path-first.
 
+The framework may also associate client, style, or declaration artifacts entirely externally. In other words, a component does not need to name or own its associated artifacts in source for the framework to connect them later.
+
 ## Component Semantics
 
 ### Props
@@ -369,6 +372,8 @@ This keeps the architecture clean:
 - Rust owns component structure and metadata
 - ESM owns actual browser APIs
 - no WebIDL-generated Rust browser layer is needed
+
+This is also the intended interop model for third-party JavaScript libraries and browser APIs in general: client code should be able to import ordinary ESM and call browser APIs directly, without any Rust-specific bridge layer.
 
 ## No Shared Framework Runtime
 
@@ -461,6 +466,12 @@ Suggested origin kinds:
 - file-backed
 - generated
 - virtual
+
+Meaning:
+
+- file-backed: an artifact comes from an existing file on disk
+- generated: an artifact can be materialized as deterministic source by the framework or another crate when needed
+- virtual: an artifact exists only as a logical or in-memory build input and may never need to exist as a stable file on disk
 
 Suggested common artifact fields:
 
@@ -767,6 +778,27 @@ export interface ButtonMountContext {
 ```
 
 Again, this is framework policy. The component system should only provide the structured data needed to derive it.
+
+If the framework chooses to support IDE-friendly TypeScript authoring, it may also provide a `tsconfig.json` or equivalent editor-facing configuration purely for tooling. That does not imply that the build itself depends on Node.js or TypeScript tooling.
+
+## Import Resolution and Tooling Expectations
+
+The component system should not invent a custom module resolver for client or style artifacts.
+
+The intended model is:
+
+- JS and TS use ordinary ESM import semantics
+- CSS uses ordinary CSS import semantics
+- package imports and relative imports remain standard
+- any IDE-facing resolution support is provided by the outer framework using normal editor conventions
+
+This should hold whether artifacts are:
+
+- file-backed
+- generated
+- virtual
+
+The goal is that editor support and bundling can rely on standard expectations even if the framework chooses to generate some of the sources or declarations.
 
 ## Suggested Public API Shape
 

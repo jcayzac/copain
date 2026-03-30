@@ -39,6 +39,7 @@ This proposal does not define:
 - CSS is a separate concern.
 - The component system is library-only and reusable.
 - The outer SSG framework owns output layout, watch mode, generated files, and bundling.
+- The component system does not own custom module resolution for JS, TS, or CSS.
 
 ## Proposed Crate Responsibilities
 
@@ -201,6 +202,7 @@ Notes:
 - not every prop should be client-visible
 - client visibility should be explicit
 - failure to serialize client-exposed data should be a clear error
+- client-visible data exists to support ordinary ESM interop, including direct use of browser APIs and third-party ESM libraries from client code
 
 ### Slots
 
@@ -295,6 +297,12 @@ pub enum ArtifactOrigin {
     Virtual { debug_name: String },
 }
 ```
+
+Meaning of these origin kinds:
+
+- `File` means the artifact comes from an existing file on disk.
+- `Generated` means the framework or another crate can materialize deterministic source for it when needed.
+- `Virtual` means the artifact exists only as a logical or in-memory build input and may never need to exist as a stable file on disk.
 
 Client artifact metadata:
 
@@ -483,6 +491,7 @@ Current bias:
 
 - keep artifact association flexible
 - do not hard-wire the macro API to sidecar file paths too early
+- allow the outer framework to associate client or style artifacts externally, without requiring the component source to name them directly
 
 ## Proposed `components-build` API
 
@@ -620,10 +629,13 @@ The framework may:
 - derive `DeclarationModel`
 - render `.d.ts` files
 - arrange a TS-friendly generated directory
+- provide a `tsconfig.json` or equivalent editor-facing configuration
 
 or it may skip this entirely.
 
 The component system should not care.
+
+This editor-facing support is separate from the build pipeline. The build may remain entirely Rust-only even if the framework generates TypeScript declarations for IDE use.
 
 ### 3. Render Pages
 
@@ -651,6 +663,8 @@ The framework then:
 - emits final assets
 
 The component system ends before this step.
+
+Importantly, resolution here should follow ordinary ESM and CSS expectations. The component system should not require a custom resolver protocol.
 
 ## Example: Static Component
 
