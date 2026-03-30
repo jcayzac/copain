@@ -241,9 +241,9 @@ This crate should not:
 Responsibilities:
 
 - expose build-facing APIs for frameworks
-- convert component metadata into declaration models
+- convert raw or framework-resolved component metadata into declaration models
 - convert page render data into page manifests
-- convert page manifests into bootstrap plans
+- convert page manifests into framework-neutral client attachment planning data
 - expose invalidation-relevant dependency and fingerprint data
 - provide helper APIs for frameworks that want to materialize IDE-facing files
 
@@ -271,8 +271,8 @@ A component is a Rust-defined render unit with:
 - typed props
 - typed slots
 - HTML output
-- optional associated client artifact metadata
-- optional associated style artifact metadata
+- optional source-declared artifact hints
+- optional framework-resolved client and style associations
 
 The component system should separate:
 
@@ -307,6 +307,41 @@ This means the component system should model artifact association abstractly, no
 
 The framework may also associate client, style, or declaration artifacts entirely externally. In other words, a component does not need to name or own its associated artifacts in source for the framework to connect them later.
 
+## Metadata Resolution Lifecycle
+
+The component system needs two distinct metadata layers.
+
+The first layer is raw component metadata, discovered from Rust component definitions. This includes:
+
+- component identity
+- prop schema
+- slot schema
+- ref schema
+- optional source-declared artifact hints
+
+The second layer is framework-resolved component metadata, produced after the outer framework applies its own policy. This includes:
+
+- associated client artifacts
+- associated style artifacts
+- associated declaration artifacts
+- marker requirements implied by those associations
+
+This distinction matters because artifact association may be:
+
+- source-declared
+- convention-based
+- configured externally by the framework
+- generated elsewhere in the build graph
+
+The intended lifecycle is:
+
+1. discover raw component metadata
+2. let the outer framework resolve artifact associations and marker requirements
+3. render using framework-resolved component descriptors
+4. produce page manifests and client-attachment planning data from that resolved view
+
+Rendering and instance recording should operate on the resolved view, not only on raw `ComponentMeta`, because marker emission and client/style requirements depend on framework policy.
+
 ## Component Semantics
 
 ### Props
@@ -338,6 +373,24 @@ Requirements:
 - slots are typed as renderable content, not strings
 
 The slot model should take inspiration from Astro's semantics while remaining Rust-native in its typing.
+
+### Phase-1 Slot Representation
+
+For phase 1, props and slots should remain distinct in the public component model, in diagnostics, and in metadata.
+
+That means:
+
+- props are typed configuration inputs
+- slots are typed projected child content
+- `.d.ts` generation and other tooling should derive from that semantic distinction
+
+However, macro expansion may still lower a component internally to a single generated component-input struct if that simplifies implementation. If it does, that lowered struct is a private implementation detail and should not become the conceptual API.
+
+So the intended rule is:
+
+- public semantics: props and slots are distinct
+- internal lowering: a generated private input struct may carry both
+- metadata and tooling: props and slots remain modeled separately
 
 ### Rendering
 
@@ -404,7 +457,7 @@ CSS should remain outside the component core, but the component core must descri
 
 The component system should support:
 
-- optional associated style artifact metadata
+- optional style artifact hints and/or resolved style artifact metadata
 - stable scope identities or scoping hints
 - optional HTML marker requirements for scoping
 
@@ -459,7 +512,7 @@ Suggested artifact kinds:
 - client artifact
 - style artifact
 - declaration artifact
-- page bootstrap artifact
+- framework bootstrap artifact
 
 Suggested origin kinds:
 
@@ -490,6 +543,63 @@ This lets the same component system support:
 - IDE-friendly generated outputs
 - purely in-memory pipelines
 
+## Identifier Stability
+
+The docs currently use the word "stable" for several identifiers. That stability should be defined per category rather than assumed to mean one thing everywhere.
+
+### Component IDs
+
+Component IDs should be stable across:
+
+- process restarts
+- rebuilds of unchanged source
+
+Initially, they do not need to be stable across:
+
+- source moves
+- renames
+- deliberate identity-affecting refactors
+
+### Artifact IDs
+
+Artifact IDs should be stable across:
+
+- process restarts
+- rebuilds where the same resolved artifact association still applies
+
+They do not need to be stable across:
+
+- framework policy changes
+- changes in artifact origin
+- changes in association rules
+
+### Scope IDs
+
+Scope IDs should be stable across:
+
+- rebuilds of unchanged component and style-association inputs
+
+They do not need to be stable across:
+
+- changes in CSS scoping policy
+- changes in associated style artifacts
+
+### Instance IDs
+
+Instance IDs are page-local and render-local.
+
+They should be stable within one render and deterministic for the same rendered page shape, but they should not be treated as long-lived identifiers across arbitrary template edits or tree reordering.
+
+### Marker Identities
+
+Marker identities should be deterministic for one rendered page and sufficiently stable for client attachment on unchanged output, but they should not be treated as a public compatibility contract across unrelated markup changes.
+
+### Fingerprints
+
+Fingerprints are invalidation tokens, not semantic identifiers.
+
+They should be stable for identical logical inputs, but frameworks should treat them as cache keys rather than as user-visible IDs.
+
 ## Core Metadata Types
 
 The exact API can evolve, but the system needs types equivalent to the following.
@@ -505,11 +615,18 @@ Should include:
 - prop schema
 - slot schema
 - ref schema
-- associated client artifact descriptor if any
-- associated style artifact descriptor if any
-- declaration-model descriptor
-- marker requirements
+- optional source-declared artifact hints
 - fingerprint inputs
+
+### `ResolvedComponentDescriptor`
+
+Should include:
+
+- a reference to the raw `ComponentMeta`
+- the resolved client artifact descriptor if any
+- the resolved style artifact descriptor if any
+- the resolved declaration descriptor if any
+- marker requirements implied by the resolved associations
 
 ### `PropMeta`
 
@@ -549,7 +666,7 @@ Should include:
 - artifact ID
 - origin kind
 - optional source location
-- logical module specifier or framework-facing handle
+- logical artifact handle or framework-facing reference
 - expected mount contract version
 - client-exposed prop schema
 - required refs
@@ -579,6 +696,7 @@ Important rule:
 
 - the component system produces declaration data or declaration renderers
 - the framework decides whether to emit `.d.ts` files, where to place them, and whether to expose them to IDEs
+- declaration generation should follow semantic metadata for props and slots, not any private lowered implementation struct used internally by macro expansion
 
 ## Render-Time Tracking Types
 
@@ -600,6 +718,7 @@ Should include:
 
 - component ID
 - stable page-local instance ID
+- resolved client artifact ID if any
 - serialized client payload
 - marker identities
 - ref marker mapping
@@ -614,7 +733,7 @@ Should include:
 - used client artifact set
 - used style artifact set
 - instance records
-- bootstrap requirements
+- client attachment planning inputs
 - invalidation or fingerprint data
 
 This manifest is a primary integration point for the outer framework.
@@ -633,9 +752,27 @@ The component system should make this possible through generated metadata access
 - how results are cached
 - how invalidation is tracked
 
-### 2. Rendering Pages
+### 2. Resolving Framework Policy
 
-The framework should render pages using `components-core` rendering APIs.
+Before rendering, the framework should resolve raw component metadata into framework-resolved component descriptors.
+
+This step is where the framework may:
+
+- associate client artifacts
+- associate style artifacts
+- associate declaration artifacts
+- decide which markers are required
+
+This step may use:
+
+- source-declared hints
+- file conventions
+- generated artifacts
+- configuration or framework policy
+
+### 3. Rendering Pages
+
+The framework should render pages using `components-core` rendering APIs and the framework-resolved component descriptors.
 
 During render:
 
@@ -649,7 +786,7 @@ After render:
 - `PageManifest` is available
 - framework can proceed to artifact planning
 
-### 3. Generating IDE-Facing Artifacts
+### 4. Generating IDE-Facing Artifacts
 
 If the framework wants IDE support for client-side code, it may choose to materialize declaration data as `.d.ts` files.
 
@@ -664,14 +801,16 @@ The framework may choose:
 
 The component system should not assume any of these choices.
 
-### 4. Generating Page Bootstrap Plans
+Those declarations may be derived from raw semantic metadata, from framework-resolved component descriptors, or from both, depending on how the framework models client-side contracts.
 
-From `PageManifest`, the framework should generate page-level client bootstrap artifacts.
+### 5. Generating Page Bootstrap Artifacts
+
+From `PageManifest` and the framework-resolved component descriptors, the framework should generate page-level client bootstrap artifacts.
 
 Important rule:
 
 - page bootstrap generation belongs to the framework
-- the component system should only expose the plan inputs
+- the component system should only expose framework-neutral client attachment planning data
 
 The resulting bootstrap should:
 
@@ -680,7 +819,7 @@ The resulting bootstrap should:
 - reconstruct mount contexts from HTML markers and serialized data
 - call the component client contract for each instance
 
-### 5. Handling CSS
+### 6. Handling CSS
 
 The framework should decide how to turn style artifact metadata into bundled CSS output.
 
@@ -693,13 +832,13 @@ Depending on framework policy, this may involve:
 
 The component system should stay neutral and simply expose what is needed.
 
-### 6. Bundling and Tree-Shaking
+### 7. Bundling and Tree-Shaking
 
 This belongs entirely to the outer framework.
 
 The framework should take:
 
-- page bootstrap artifacts
+- framework-generated bootstrap or client-entry artifacts
 - client artifacts
 - style artifacts
 - any generated declaration or manifest data it needs
@@ -715,7 +854,7 @@ and run them through Rust-native tooling for:
 
 The component system should not know which bundler implementation is used.
 
-### 7. Watch Mode
+### 8. Watch Mode
 
 Watch mode belongs entirely to the outer framework.
 
@@ -898,13 +1037,13 @@ Acceptance criteria:
 
 Deliverables:
 
-- page-manifest to bootstrap-plan conversion
+- page-manifest to framework-neutral client attachment planning data
 - stable instance lookup strategy
 - framework-facing mount contract spec
 
 Acceptance criteria:
 
-- a framework can generate one page bootstrap artifact per page
+- a framework can generate one page bootstrap or client-entry artifact per page from the planning data
 - the bootstrap imports each used client artifact once
 - no per-instance ESM output is required
 - the mount contract stays plain ESM-oriented

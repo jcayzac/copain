@@ -72,7 +72,7 @@ Proposed responsibilities:
 Proposed responsibilities:
 
 - declaration-model generation
-- bootstrap-plan generation
+- framework-neutral client attachment planning data
 - metadata enumeration helpers
 - invalidation/fingerprint helpers
 - framework-facing render outputs and plans
@@ -105,18 +105,37 @@ Notes:
 - `Render` is the core boundary. A component ultimately produces HTML through it.
 - `IntoHtml` is useful for composability in builder APIs and slot values.
 
-### Components
+### Public Semantics vs Internal Lowering
 
-A component should feel like a strongly typed Rust function, but frameworks need runtime-independent metadata as well.
+For phase 1, the public component model should keep props and slots distinct.
+
+That means:
+
+- props are typed configuration inputs
+- slots are typed projected child content
+- metadata represents props and slots separately
+- declaration generation should derive from that semantic model
+
+However, macro expansion may still lower a component internally to a single generated input struct if that simplifies implementation.
+
+That lowered struct should be treated as:
+
+- private
+- generated
+- replaceable later without changing the conceptual API
+
+### Internal Component Contract
+
+The generated implementation contract can therefore be smaller than the public semantic model.
 
 Candidate shape:
 
 ```rust
-pub trait Component {
-    type Props;
+pub trait LoweredComponent {
+    type Inputs;
 
     fn meta() -> &'static ComponentMeta;
-    fn render(props: Self::Props, cx: &mut RenderContext) -> HtmlFragment;
+    fn render(inputs: Self::Inputs, cx: &mut RenderContext) -> HtmlFragment;
 }
 ```
 
@@ -125,9 +144,9 @@ This may end up being generated rather than directly user-implemented.
 Alternative shape:
 
 ```rust
-pub trait Component<Props> {
+pub trait LoweredComponent<Inputs> {
     fn meta() -> &'static ComponentMeta;
-    fn render(props: Props, cx: &mut RenderContext) -> HtmlFragment;
+    fn render(inputs: Inputs, cx: &mut RenderContext) -> HtmlFragment;
 }
 ```
 
@@ -135,6 +154,7 @@ Current bias:
 
 - prefer generated implementations from `#[component]`
 - do not require users to manually implement these traits
+- keep this trait internal or semi-internal if possible
 
 ### Render Context
 
@@ -143,20 +163,22 @@ The render context is the main accumulation point during page generation.
 Candidate API:
 
 ```rust
-pub struct RenderContext {
+pub struct RenderContext<'a> {
     // internal state
 }
 
-impl RenderContext {
-    pub fn new() -> Self;
+impl<'a> RenderContext<'a> {
+    pub fn new(resolved: &'a ResolvedComponentIndex) -> Self;
 
-    pub fn register_component_use(&mut self, component: &'static ComponentMeta);
+    pub fn register_component_use(&mut self, component: &'a ResolvedComponent);
 
-    pub fn register_style_use(&mut self, style: &'static StyleArtifactMeta);
+    pub fn register_style_use(&mut self, style: &'a StyleArtifactMeta);
 
     pub fn register_client_instance(&mut self, instance: InstanceRecord);
 
     pub fn alloc_instance_id(&mut self, component_id: ComponentId) -> InstanceId;
+
+    pub fn resolved(&self, component_id: ComponentId) -> &'a ResolvedComponent;
 
     pub fn finish(self, page: PageIdentity) -> PageManifest;
 }
@@ -208,18 +230,25 @@ Notes:
 
 Slots should support default and named semantics, with typing kept Rust-native.
 
+For phase 1, the public semantics should stay explicit, but the generated implementation may lower slot inputs to private fields inside a generated component-input struct.
+
 Candidate shape:
 
 ```rust
-pub trait SlotValue: IntoHtml {}
-
-pub struct Slots {
-    // internal
+pub struct SlotFragment {
+    // Opaque for now.
 }
 
-impl Slots {
-    pub fn has(&self, name: SlotName) -> bool;
-    pub fn get(&self, name: SlotName) -> Option<&dyn SlotValue>;
+pub enum SlotContent {
+    Empty,
+    One(SlotFragment),
+    Many(Vec<SlotFragment>),
+}
+
+impl SlotContent {
+    pub fn is_empty(&self) -> bool;
+    pub fn len(&self) -> usize;
+    pub fn into_html(self) -> HtmlFragment;
 }
 
 pub struct SlotMeta {
@@ -231,15 +260,13 @@ pub struct SlotMeta {
 }
 ```
 
-Possible user-facing models:
+Notes:
 
-- slots as generated props fields
-- slots as a dedicated generated struct
-
-Current bias:
-
-- generated props struct should probably include generated slot fields
-- metadata should still keep slots explicit for tooling
+- this is intentionally a simpler and more implementable placeholder than the earlier trait-object sketch
+- multiplicity is represented explicitly in `SlotContent`
+- fallback belongs in component render logic, not in `SlotContent` itself
+- forwarding can be implemented by passing the lowered slot field onward
+- the public semantic distinction between props and slots should still be preserved in metadata and diagnostics
 
 ### Refs and Attachment Markers
 
@@ -353,10 +380,7 @@ pub struct ComponentMeta {
     pub props: &'static [PropMeta],
     pub slots: &'static [SlotMeta],
     pub refs: &'static [RefMeta],
-    pub client: Option<&'static ClientArtifactMeta>,
-    pub style: Option<&'static StyleArtifactMeta>,
-    pub declarations: Option<&'static DeclarationArtifactMeta>,
-    pub markers: MarkerRequirements,
+    pub artifact_hints: ArtifactHints,
     pub fingerprint: Fingerprint,
 }
 ```
@@ -366,6 +390,47 @@ Notes:
 - this type should be cheap to store and query
 - most fields should likely be `'static`
 - the framework should be able to enumerate these metas without instantiating components
+
+Candidate supporting types:
+
+```rust
+pub struct ArtifactHints {
+    pub client: Option<ArtifactHint>,
+    pub style: Option<ArtifactHint>,
+    pub declarations: Option<ArtifactHint>,
+}
+
+pub struct ArtifactHint {
+    pub logical_name: Option<String>,
+}
+```
+
+### Resolved Component Metadata
+
+The outer framework also needs a framework-resolved view of each component before render.
+
+Candidate shape:
+
+```rust
+pub struct ResolvedComponent {
+    pub meta: &'static ComponentMeta,
+    pub client: Option<ClientArtifactMeta>,
+    pub style: Option<StyleArtifactMeta>,
+    pub declarations: Option<DeclarationArtifactMeta>,
+    pub markers: MarkerRequirements,
+}
+
+pub struct ResolvedComponentIndex {
+    // internal lookup structure
+}
+```
+
+Notes:
+
+- `ComponentMeta` is raw component metadata
+- `ResolvedComponent` is produced after the framework applies association policy
+- rendering and instance recording should operate against `ResolvedComponent`
+- marker requirements belong to the resolved view, not only to raw source metadata
 
 ### Render-Time Records
 
@@ -393,6 +458,17 @@ pub struct PageManifest {
 ```
 
 This is the core framework integration output from a render.
+
+### Identifier Stability Notes
+
+The docs use the word "stable" for several identifiers. This proposal assumes the following:
+
+- `ComponentId` should be stable across process restarts and rebuilds of unchanged source
+- `ArtifactId` should be stable across unchanged resolution results
+- `ScopeId` should be stable across unchanged component and style-association inputs
+- `InstanceId` is page-local and render-local, not a long-lived public identifier
+- markers should be deterministic for unchanged rendered output
+- fingerprints are invalidation tokens, not semantic identifiers
 
 ## Proposed `components-macros` API
 
@@ -535,7 +611,7 @@ pub enum TsExport {
 Candidate API:
 
 ```rust
-pub fn declaration_model(component: &ComponentMeta) -> Option<DeclarationModel>;
+pub fn declaration_model(component: &ResolvedComponent) -> Option<DeclarationModel>;
 
 pub fn render_typescript_declaration(model: &DeclarationModel) -> String;
 ```
@@ -545,27 +621,23 @@ Notes:
 - a framework may use the structured form directly
 - a framework may also render it to `.d.ts`
 - the component system should support both
+- declaration generation should use semantic component metadata, not the private lowered input struct used by macro expansion
+- the resolved component view is used here so framework-owned artifact association can influence whether declarations are produced and how they are named
 
-### Bootstrap Planning
+### Client Attachment Planning
 
-The framework needs a plan for generating page-level ESM entrypoints.
+The framework needs framework-neutral planning data for generating page-level ESM entrypoints.
 
 Candidate types:
 
 ```rust
-pub struct BootstrapPlan {
+pub struct ClientMountPlan {
     pub page: PageIdentity,
-    pub imports: Vec<BootstrapImport>,
-    pub mount_groups: Vec<MountGroup>,
+    pub artifacts: Vec<ArtifactId>,
+    pub mount_groups: Vec<ClientMountGroup>,
 }
 
-pub struct BootstrapImport {
-    pub artifact_id: ArtifactId,
-    pub specifier: String,
-    pub export_name: Option<String>,
-}
-
-pub struct MountGroup {
+pub struct ClientMountGroup {
     pub component_id: ComponentId,
     pub artifact_id: ArtifactId,
     pub instances: Vec<InstanceRecord>,
@@ -575,10 +647,10 @@ pub struct MountGroup {
 Candidate API:
 
 ```rust
-pub fn bootstrap_plan(
+pub fn client_mount_plan(
     manifest: &PageManifest,
-    components: &ComponentIndex,
-) -> BootstrapPlan;
+    resolved: &ResolvedComponentIndex,
+) -> ClientMountPlan;
 ```
 
 The framework can then decide whether to:
@@ -586,6 +658,8 @@ The framework can then decide whether to:
 - emit a real `.ts` file
 - emit a generated `.js` file
 - keep the plan in memory and hand it directly to a bundler layer
+
+Importantly, this plan should remain framework-neutral. It should not contain resolved import specifiers or other bundler-policy details.
 
 ### Invalidation Helpers
 
@@ -622,7 +696,22 @@ The framework:
 - enumerates `ComponentMeta`
 - caches component metadata and invalidation keys
 
-### 2. Optionally Materialize IDE Support
+### 2. Resolve Component Associations
+
+The framework:
+
+- starts from raw `ComponentMeta`
+- applies its artifact-association policy
+- produces a `ResolvedComponentIndex`
+
+This is where the framework may use:
+
+- source-declared hints
+- file conventions
+- generated artifacts
+- configuration
+
+### 3. Optionally Materialize IDE Support
 
 The framework may:
 
@@ -637,23 +726,23 @@ The component system should not care.
 
 This editor-facing support is separate from the build pipeline. The build may remain entirely Rust-only even if the framework generates TypeScript declarations for IDE use.
 
-### 3. Render Pages
+### 4. Render Pages
 
 The framework:
 
-- creates a `RenderContext`
+- creates a `RenderContext` using the `ResolvedComponentIndex`
 - renders a page
 - obtains HTML plus `PageManifest`
 
-### 4. Plan Client and Style Outputs
+### 5. Plan Client and Style Outputs
 
 From `PageManifest`, the framework:
 
 - determines which client artifacts are used
 - determines which style artifacts are used
-- builds a `BootstrapPlan`
+- builds a `ClientMountPlan`
 
-### 5. Bundle in the Outer Layer
+### 6. Bundle in the Outer Layer
 
 The framework then:
 
@@ -722,14 +811,13 @@ Conceptual render outcome:
 
 - the page HTML includes stable markers for the component instance
 - `RenderContext` records one `InstanceRecord` per rendered instance
-- the framework later groups all such instances under one client artifact in the bootstrap plan
+- the framework later groups all such instances under one client artifact in the client-mount plan
 
 ## Open Questions
 
 These points are intentionally unresolved in this proposal.
 
 - Should `Component` be a real public trait, or only a generated internal contract?
-- Should slots be modeled as generated props fields, or as a dedicated `Slots` input?
 - How much of the props API should be driven by generated props structs versus function parameters?
 - What registry/discovery mechanism is the least awkward for frameworks?
 - How much source-span information should be retained in metadata?
