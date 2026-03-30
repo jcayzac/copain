@@ -226,6 +226,29 @@ Notes:
 - failure to serialize client-exposed data should be a clear error
 - client-visible data exists to support ordinary ESM interop, including direct use of browser APIs and third-party ESM libraries from client code
 
+### Client Attachment Interface
+
+This proposal uses terms such as client attachment planning data and, earlier in the design discussion, mount-oriented wording. These should be read as framework-facing integration details, not as a new public semantic concept alongside props or slots.
+
+Their purpose is simply to describe the handshake between:
+
+- framework-generated page bootstrap or client-entry code
+- component-specific client ESM modules
+
+This interface is needed because the architecture intentionally separates:
+
+- Rust component semantics
+- framework-owned page bootstrap generation
+- plain ESM client behavior
+
+So the framework needs a minimal, explicit way to pass per-instance attachment data such as:
+
+- the root DOM node
+- named refs
+- serialized client-visible props
+
+This is an internal or semi-internal interface. It is not meant to become a user-facing programming model in its own right.
+
 ### Slots
 
 Slots should support default and named semantics, with typing kept Rust-native.
@@ -315,7 +338,7 @@ pub enum ArtifactKind {
     Client,
     Style,
     Declaration,
-    PageBootstrap,
+    FrameworkBootstrap,
 }
 
 pub enum ArtifactOrigin {
@@ -340,7 +363,7 @@ pub struct ClientArtifactMeta {
     pub export_name: Option<String>,
     pub props: Vec<PropMeta>,
     pub refs: Vec<RefMeta>,
-    pub mount_contract: MountContractVersion,
+    pub attachment_interface: ClientAttachmentInterfaceVersion,
     pub requires_markers: bool,
 }
 ```
@@ -394,6 +417,12 @@ Notes:
 Candidate supporting types:
 
 ```rust
+pub struct ClientAttachmentPayload {
+    pub root: RootHandle,
+    pub refs: RefMap,
+    pub props: Option<ClientValue>,
+}
+
 pub struct ArtifactHints {
     pub client: Option<ArtifactHint>,
     pub style: Option<ArtifactHint>,

@@ -698,6 +698,29 @@ Important rule:
 - the framework decides whether to emit `.d.ts` files, where to place them, and whether to expose them to IDEs
 - declaration generation should follow semantic metadata for props and slots, not any private lowered implementation struct used internally by macro expansion
 
+## Client Attachment Interface
+
+The docs use terms such as client attachment planning data, mount contract, and mount context. These should not be read as new public component concepts on the same level as components, props, or slots.
+
+Instead, they refer to an internal integration boundary between:
+
+- framework-generated page bootstrap or client-entry code
+- component-associated client ESM modules
+
+This boundary is needed because the design deliberately separates:
+
+- Rust-authored component semantics
+- framework-owned page bootstrap generation
+- ordinary ESM client behavior
+
+So the framework needs a small, explicit way to pass per-instance attachment data such as:
+
+- the root DOM node
+- named refs
+- serialized client-visible props
+
+This is primarily a framework-facing and implementation-facing interface. It should not be treated as a user-facing paradigm or as a new conceptual pillar of the component model.
+
 ## Render-Time Tracking Types
 
 The component system also needs page-level runtime-independent tracking.
@@ -1039,14 +1062,14 @@ Deliverables:
 
 - page-manifest to framework-neutral client attachment planning data
 - stable instance lookup strategy
-- framework-facing mount contract spec
+- framework-facing client attachment interface spec
 
 Acceptance criteria:
 
 - a framework can generate one page bootstrap or client-entry artifact per page from the planning data
 - the bootstrap imports each used client artifact once
 - no per-instance ESM output is required
-- the mount contract stays plain ESM-oriented
+- the client attachment interface stays plain ESM-oriented
 
 ### Phase 6: Ergonomics and Diagnostics
 
